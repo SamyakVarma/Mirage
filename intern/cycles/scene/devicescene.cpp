@@ -20,6 +20,7 @@ DeviceScene::DeviceScene(Device *device)
       tri_shader(device, "tri_shader", MEM_GLOBAL),
       tri_vindex(device, "tri_vindex", MEM_GLOBAL),
       tri_verts(device, "tri_verts", MEM_GLOBAL),
+      tri_adjacency(device, "tri_adjacency", MEM_GLOBAL),
       curves(device, "curves", MEM_GLOBAL),
       curve_keys(device, "curve_keys", MEM_GLOBAL),
       curve_segments(device, "curve_segments", MEM_GLOBAL),

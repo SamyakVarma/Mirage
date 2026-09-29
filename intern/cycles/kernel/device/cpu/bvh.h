@@ -23,9 +23,11 @@
 #include "kernel/bvh/util.h"
 #include "kernel/geom/gsplat_intersect.h"
 #include "kernel/geom/object.h"
+#include "kernel/geom/triangle.h"
 #include "kernel/integrator/state.h"
 #include "kernel/integrator/state_util.h"
 #include "kernel/sample/lcg.h"
+#include "kernel/util/math_prism.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -147,7 +149,14 @@ ccl_device_inline bool kernel_embree_is_self_intersection(const KernelGlobals kg
 
   const bool is_hair = hit->geomID & 1;
   if (is_hair) {
-    prim = kernel_data_fetch(curve_segments, prim).prim;
+    /* Prism shell (research prototype, see kernel_embree_convert_hit below):
+     * the "geomID & 1" slot is reused for the synthetic aura shell on
+     * triangle-mesh objects, which never have real hair geometry of their
+     * own -- only look up curve_segments for an actual hair object. */
+    const int object_primitive_type = kernel_data_fetch(objects, object).primitive_type;
+    if (!(object_primitive_type & PRIMITIVE_TRIANGLE)) {
+      prim = kernel_data_fetch(curve_segments, prim).prim;
+    }
   }
 
   return intersection_skip_self_shadow(ray->self, object, prim);
@@ -166,15 +175,29 @@ ccl_device_inline void kernel_embree_convert_hit(KernelGlobals kg,
   isect->object = object;
 
   const bool is_hair = hit->geomID & 1;
-  if (is_hair) {
+  const int object_primitive_type = kernel_data_fetch(objects, isect->object).primitive_type;
+  if (is_hair && !(object_primitive_type & PRIMITIVE_TRIANGLE)) {
     const KernelCurveSegment segment = kernel_data_fetch(curve_segments, isect->prim);
     isect->type = segment.type;
     isect->prim = segment.prim;
     isect->u = hit->u;
     isect->v = hit->v;
   }
+  else if (is_hair) {
+    /* Prism shell (research prototype): the "geomID & 1" slot is reused for
+     * the synthetic aura shell on triangle-mesh objects (see
+     * BVHEmbree::add_prism_shell) -- a triangle-mesh object never has real
+     * hair geometry of its own, so this can only be a prism-shell hit.
+     * `isect->prim` (set above, from hit->primID + prim_offset) is already
+     * the real source triangle's global index -- the prism shell has one
+     * primitive per triangle, reusing the triangle's own index space (no
+     * separate prim-offset accounting needed, see add_prism_shell). */
+    isect->type = PRIMITIVE_PRISM;
+    isect->u = hit->u;
+    isect->v = hit->v;
+  }
   else {
-    isect->type = kernel_data_fetch(objects, isect->object).primitive_type;
+    isect->type = object_primitive_type;
     isect->u = hit->u;
     isect->v = hit->v;
   }
@@ -233,11 +256,138 @@ ccl_device_forceinline int custom_intersect_get_object(const RTCRayQueryContext 
   return ((ctx.instID[0] != RTC_INVALID_GEOMETRY_ID) ? ctx.instID[0] : geom_id) / 2;
 }
 
+/* Prism shell (research prototype, Stage 1): one prism per source triangle
+ * (see kernel/util/math_prism.h), registered as a real closest-hit
+ * candidate exactly like the triangle mesh itself. Only the ENTRY t is used
+ * here to pick the closest hit among everything the ray could touch; the
+ * exit t and the actual emission integral are recomputed cheaply from
+ * scratch in shade_surface.h once this hit is confirmed to be the winner
+ * (avoids threading extra fields through Intersection/ShaderData). */
+ccl_device_forceinline void kernel_embree_prism_intersect_func_impl(
+    const RTCIntersectFunctionNArguments *args)
+{
+  RTCRayHit *ray_hit = (RTCRayHit *)args->rayhit;
+  CCLFirstHitContext *ctx = (CCLFirstHitContext *)(args->context);
+#ifdef __KERNEL_ONEAPI__
+  KernelGlobalsGPU *kg = nullptr;
+#else
+  const ThreadKernelGlobalsCPU *kg = ctx->kg;
+#endif
+
+  const float3 ray_P = make_float3(ray_hit->ray.org_x, ray_hit->ray.org_y, ray_hit->ray.org_z);
+  const float3 ray_D = make_float3(ray_hit->ray.dir_x, ray_hit->ray.dir_y, ray_hit->ray.dir_z);
+
+  const uint object = custom_intersect_get_object(*ctx, args->geomID);
+  const int prim_offset = kernel_data_fetch(object_prim_offset, object);
+  const int prim = args->primID + prim_offset;
+
+  const Ray *cray = ctx->ray;
+
+  /* PRISM_DISABLE_ALL_TAG is written (see shade_surface.h) once a ray has
+   * crossed too many prisms in a row without resolving to something real --
+   * it means "stop letting this ray see ANY prism, unconditionally", so it
+   * doesn't depend on which specific object/prim is being tested here. This
+   * is what lets the very next search jump straight to the real surface or
+   * background in one step, guaranteeing the path actually terminates
+   * rather than needing an unbounded number of individual crossings to
+   * work through a dense overlap region one tiny step at a time. */
+  if (cray->self.prim == PRISM_DISABLE_ALL_TAG) {
+    args->valid[0] = 0;
+    return;
+  }
+
+  /* Compare against the TAGGED form -- see PRISM_SELF_TAG in
+   * math_prism.h for why this must not be a plain prim match. */
+  if (object == cray->self.object && (prim | PRISM_SELF_TAG) == cray->self.prim) {
+    args->valid[0] = 0;
+    return;
+  }
+
+  const float thickness = kernel_data_fetch(objects, object).prism_shell_thickness;
+  if (thickness <= 0.0f) {
+    args->valid[0] = 0;
+    return;
+  }
+
+  float3 tri_P[3];
+  float3 tri_N[3];
+  triangle_vertices_and_normals(kg, object, prim, tri_P, tri_N);
+
+  float t_enter, t_exit;
+  float3 Nface;
+  int exit_plane; /* unused here -- only shade_surface.h's fast-hop needs it. */
+  if (!ray_triangle_prism_intersect(ray_P,
+                                    ray_D,
+                                    ray_hit->ray.tnear,
+                                    ray_hit->ray.tfar,
+                                    tri_P[0],
+                                    tri_P[1],
+                                    tri_P[2],
+                                    tri_N[0],
+                                    tri_N[1],
+                                    tri_N[2],
+                                    thickness,
+                                    &t_enter,
+                                    &t_exit,
+                                    &Nface,
+                                    &exit_plane))
+  {
+    args->valid[0] = 0;
+    return;
+  }
+  (void)t_exit; /* recomputed in shade_surface.h, see comment above. */
+
+  RTCHit potential_hit;
+  potential_hit.u = 0.0f;
+  potential_hit.v = 0.0f;
+  potential_hit.Ng_x = Nface.x;
+  potential_hit.Ng_y = Nface.y;
+  potential_hit.Ng_z = Nface.z;
+  potential_hit.primID = args->primID;
+  potential_hit.geomID = args->geomID;
+  potential_hit.instID[0] = ctx->instID[0];
+
+  const float old_tfar = ray_hit->ray.tfar;
+  ray_hit->ray.tfar = t_enter;
+
+  RTCFilterFunctionNArguments filter_args;
+  int valid = -1;
+  filter_args.valid = &valid;
+  filter_args.geometryUserPtr = args->geometryUserPtr;
+  filter_args.context = args->context;
+  filter_args.ray = (RTCRayN *)&ray_hit->ray;
+  filter_args.hit = (RTCHitN *)&potential_hit;
+  filter_args.N = 1;
+  kernel_embree_filter_intersection_func_impl(&filter_args);
+  if (!valid) {
+    ray_hit->ray.tfar = old_tfar;
+    args->valid[0] = 0;
+    return;
+  }
+
+  ray_hit->hit = potential_hit;
+  args->valid[0] = -1;
+}
+
 ccl_device_forceinline void kernel_embree_custom_intersection_func_impl(
     const RTCIntersectFunctionNArguments *args)
 {
   kernel_assert(args->N == 1);
   static_assert(RTC_MAX_INSTANCE_LEVEL_COUNT == 1);
+
+  if (!args->valid[0]) {
+    return;
+  }
+
+  /* Prism shell (research prototype): geom IDs of the form i*2+1 are the
+   * synthetic aura shell (see BVHEmbree::add_prism_shell) when the hit
+   * object's real geometry is a triangle mesh -- hair curves are a
+   * built-in Embree geometry type and never reach this user-geometry
+   * callback, so that combination can only mean a prism-shell hit. */
+  if (args->geomID & 1) {
+    kernel_embree_prism_intersect_func_impl(args);
+    return;
+  }
 
 #if defined(__GSPLATS__)
   CCLFirstHitContext *ctx = (CCLFirstHitContext *)(args->context);
@@ -248,10 +398,6 @@ ccl_device_forceinline void kernel_embree_custom_intersection_func_impl(
 #  else
   const ThreadKernelGlobalsCPU *kg = ctx->kg;
 #  endif
-
-  if (!args->valid[0]) {
-    return;
-  }
 
   const float3 ray_P = make_float3(ray_hit->ray.org_x, ray_hit->ray.org_y, ray_hit->ray.org_z);
   const float3 ray_D = make_float3(ray_hit->ray.dir_x, ray_hit->ray.dir_y, ray_hit->ray.dir_z);
@@ -318,11 +464,20 @@ ccl_device_forceinline void kernel_embree_custom_occluded_func_impl(
   kernel_assert(args->N == 1);
   static_assert(RTC_MAX_INSTANCE_LEVEL_COUNT == 1);
 
-#if defined(__GSPLATS__)
   if (!args->valid[0]) {
     return;
   }
 
+  /* Prism shell (research prototype): the aura shell deliberately casts no
+   * shadow (per design -- it's meant to look like glow, not a solid
+   * occluder), so any shadow/occlusion ray reaching it here just passes
+   * straight through rather than running the gsplat-assuming logic below. */
+  if (args->geomID & 1) {
+    args->valid[0] = 0;
+    return;
+  }
+
+#if defined(__GSPLATS__)
   CCLShadowContext *ctx = (CCLShadowContext *)(args->context);
   RTCRay *ray = (RTCRay *)args->ray;
   BVHShadowAllPayload &payload = *ctx->payload;

@@ -18,6 +18,7 @@
 #include "subd/split.h"
 
 #include "util/log.h"
+#include "util/map.h"
 #include "util/set.h"
 
 #include "mikktspace.hh"
@@ -910,6 +911,66 @@ void Mesh::pack_triangles(packed_uint3 *tri_vindex)
   for (size_t i = 0; i < triangles_size; i++) {
     tri_vindex[i] = make_packed_uint3(p_tris[off + 0], p_tris[off + 1], p_tris[off + 2]);
     off += 3;
+  }
+}
+
+void Mesh::pack_adjacency(packed_int3 *tri_adjacency, const int prim_offset)
+{
+  /* Prism shell (research prototype): find, for each triangle's 3 edges,
+   * the other triangle (if any) sharing that edge -- a single O(triangles)
+   * pass over a hash map keyed by each edge's canonicalized (sorted)
+   * vertex-index pair, packed into one 64-bit key so std::unordered_map's
+   * default hash applies directly (no custom hash functor needed). The
+   * first triangle to touch an edge registers as its provisional owner;
+   * the second cross-links both triangles' adjacency slots to each other.
+   * A third or later claim on the same edge (non-manifold geometry) is
+   * simply left unresolved for that occurrence -- "who's my one neighbor"
+   * is ambiguous there, so it stays a boundary (-1) as far as the fast-hop
+   * in shade_surface.h is concerned, falling back to the normal
+   * search-based path for that edge specifically. Indices produced here
+   * are mesh-LOCAL (0-based within this mesh); the caller offsets them by
+   * prim_offset when packing into the scene-wide array, same as it
+   * already does implicitly for tri_vindex's own placement. */
+  const size_t triangles_size = num_triangles();
+  const int *p_tris = triangles.data();
+
+  for (size_t i = 0; i < triangles_size; i++) {
+    tri_adjacency[i] = make_packed_int3(-1, -1, -1);
+  }
+
+  unordered_map<uint64_t, int> edge_owner;
+  edge_owner.reserve(triangles_size * 3);
+
+  for (size_t i = 0; i < triangles_size; i++) {
+    const int v0 = p_tris[i * 3 + 0];
+    const int v1 = p_tris[i * 3 + 1];
+    const int v2 = p_tris[i * 3 + 2];
+    const int edge_v0[3] = {v0, v1, v2};
+    const int edge_v1[3] = {v1, v2, v0};
+
+    for (int slot = 0; slot < 3; slot++) {
+      int a = edge_v0[slot];
+      int b = edge_v1[slot];
+      if (a > b) {
+        std::swap(a, b);
+      }
+      const uint64_t key = (uint64_t(uint32_t(a)) << 32) | uint32_t(b);
+
+      const unordered_map<uint64_t, int>::iterator it = edge_owner.find(key);
+      if (it == edge_owner.end()) {
+        edge_owner[key] = int(i) * 3 + slot;
+      }
+      else if (it->second >= 0) {
+        const int other = it->second;
+        const int other_tri = other / 3;
+        const int other_slot = other % 3;
+        tri_adjacency[i][slot] = other_tri + prim_offset;
+        tri_adjacency[other_tri][other_slot] = int(i) + prim_offset;
+        /* Mark consumed so a third claim on this edge (non-manifold) does
+         * not overwrite an already-resolved pairing. */
+        it->second = -1;
+      }
+    }
   }
 }
 

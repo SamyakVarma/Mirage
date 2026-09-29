@@ -414,6 +414,18 @@ def update_world(self, context):
     context.scene.world.update_tag()
 
 
+def update_prism_shell(self, context):
+    # Force a depsgraph update, because add-on properties don't.
+    # (at least not from the UI, see #138071)
+    # A bare update_tag() was not enough to make a live Rendered-viewport
+    # session re-invoke Cycles' view_update() at all for this object-level
+    # property -- only an explicit render (which always starts a fresh sync)
+    # picked up the change. Tag both OBJECT and DATA explicitly in case the
+    # viewport's redraw/resync decision specifically checks for one of those
+    # rather than the bare/default recalc tag.
+    context.object.update_tag(refresh={'OBJECT', 'DATA'})
+
+
 def set_transform_preview_pause(self, value, current_value, is_set):
     warnings.warn(
         "'CyclesRenderSettings.preview_pause' has no effect anymore and will "
@@ -1510,6 +1522,54 @@ class CyclesObjectSettings(bpy.types.PropertyGroup):
         min=0.0,
         default=0.0,
         subtype='DISTANCE',
+    )
+
+    use_prism_shell: BoolProperty(
+        name="Use Prism Shell",
+        description="Research prototype: extrude a synthetic aura shell above this object's "
+        "surface (one prism per triangle), hit by ordinary rays via the BVH and adding a "
+        "soft analytic glow that falls off with height above the surface",
+        default=False,
+        update=update_prism_shell,
+    )
+
+    prism_shell_thickness: FloatProperty(
+        name="Prism Shell Thickness",
+        description="How far above the surface the prism shell extends, and the "
+        "distance over which the glow's density falls off",
+        min=0.0,
+        default=0.1,
+        subtype='DISTANCE',
+        update=update_prism_shell,
+    )
+
+    prism_shell_strength: FloatProperty(
+        name="Prism Shell Strength",
+        description="Emission strength of the prism shell glow (uses the object's Color)",
+        min=0.0,
+        default=1.0,
+        update=update_prism_shell,
+    )
+
+    prism_falloff_power: FloatProperty(
+        name="Prism Falloff Power",
+        description="Shapes how the glow fades with height above the surface: 1.0 is a plain "
+        "linear ramp, higher values concentrate brightness closer to the surface (steeper "
+        "falloff), lower values keep it brighter for longer before dropping to fully "
+        "transparent right at the shell's outer edge",
+        min=0.01,
+        soft_max=10.0,
+        default=2.0,
+        update=update_prism_shell,
+    )
+
+    prism_approximate: BoolProperty(
+        name="Approximate",
+        description="Combine overlapping prism crossings with a max() instead of summing them "
+        "and capping the result -- a cheaper approximation that sidesteps brightness stacking "
+        "entirely rather than relying on the cap",
+        default=False,
+        update=update_prism_shell,
     )
 
     is_caustics_caster: BoolProperty(

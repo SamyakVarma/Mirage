@@ -104,6 +104,12 @@ NODE_DEFINE(Object)
 
   SOCKET_FLOAT(ao_distance, "AO Distance", 0.0f);
 
+  SOCKET_BOOLEAN(use_prism_shell, "Use Prism Shell", false);
+  SOCKET_FLOAT(prism_shell_thickness, "Prism Shell Thickness", 0.1f);
+  SOCKET_FLOAT(prism_shell_strength, "Prism Shell Strength", 1.0f);
+  SOCKET_FLOAT(prism_falloff_power, "Prism Falloff Power", 2.0f);
+  SOCKET_BOOLEAN(prism_approximate, "Prism Approximate", false);
+
   SOCKET_STRING(lightgroup, "Light Group", ustring());
   SOCKET_UINT(receiver_light_set, "Light Set Index", 0);
   SOCKET_UINT64(light_set_membership, "Light Set Membership", LIGHT_LINK_MASK_ALL);
@@ -231,6 +237,15 @@ void Object::tag_update(Scene *scene)
 
     if (is_shadow_catcher_is_modified()) {
       scene->tag_shadow_catcher_modified();
+      flag |= ObjectManager::VISIBILITY_MODIFIED;
+    }
+
+    /* Prism shell geometry lives in the BVH (see BVHEmbree::add_prism_shell),
+     * so toggling it or changing its thickness needs a real BVH rebuild --
+     * same reasoning as shadow-catcher visibility above. Without this,
+     * viewport sessions with an already-built BVH (scene->bvh != nullptr)
+     * never pick up the change; only a fresh F12 render would. */
+    if (use_prism_shell_is_modified() || prism_shell_thickness_is_modified()) {
       flag |= ObjectManager::VISIBILITY_MODIFIED;
     }
   }
@@ -593,6 +608,11 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.motion_offset = 0;
   kobject.position_offset = ATTR_STD_NOT_FOUND;
   kobject.ao_distance = ob->ao_distance;
+  kobject.prism_shell_thickness = ob->get_use_prism_shell() ? ob->get_prism_shell_thickness() :
+                                                              0.0f;
+  kobject.prism_shell_strength = ob->get_prism_shell_strength();
+  kobject.prism_falloff_power = ob->get_prism_falloff_power();
+  kobject.prism_approximate = ob->get_prism_approximate() ? 1 : 0;
   kobject.receiver_light_set = ob->receiver_light_set >= LIGHT_LINK_SET_MAX ?
                                    0 :
                                    ob->receiver_light_set;

@@ -69,6 +69,15 @@ class Object : public Node {
 
   NODE_SOCKET_API(float, ao_distance)
 
+  /* Prism shell (research prototype): synthetic aura geometry extruded
+   * above this object's real surface, hit by ordinary rays via the BVH.
+   * See PRIMITIVE_PRISM. */
+  NODE_SOCKET_API(bool, use_prism_shell)
+  NODE_SOCKET_API(float, prism_shell_thickness)
+  NODE_SOCKET_API(float, prism_shell_strength)
+  NODE_SOCKET_API(float, prism_falloff_power)
+  NODE_SOCKET_API(bool, prism_approximate)
+
   NODE_SOCKET_API(ustring, lightgroup)
   NODE_SOCKET_API(uint, receiver_light_set)
   NODE_SOCKET_API(uint64_t, light_set_membership)

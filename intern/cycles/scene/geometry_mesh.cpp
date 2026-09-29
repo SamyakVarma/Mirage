@@ -20,6 +20,7 @@
 #include "scene/shader_nodes.h"
 
 #include "util/progress.h"
+#include "util/task.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -60,11 +61,22 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
 
     uint *tri_shader = dscene->tri_shader.alloc(tri_size);
     packed_uint3 *tri_vindex = dscene->tri_vindex.alloc(tri_size);
+    packed_int3 *tri_adjacency = dscene->tri_adjacency.alloc(tri_size);
 
     const bool copy_all_data = dscene->tri_shader.need_realloc() ||
-                               dscene->tri_vindex.need_realloc();
+                               dscene->tri_vindex.need_realloc() ||
+                               dscene->tri_adjacency.need_realloc();
 
-    for (Geometry *geom : scene->geometry) {
+    /* Each mesh writes only into its own [prim_offset, prim_offset +
+     * num_triangles) slice of these scene-wide arrays, so different
+     * meshes' packing work is fully independent -- safe to run in
+     * parallel across geometries (same parallel_for_each pattern already
+     * used for other per-geometry work in scene/geometry.cpp). */
+    parallel_for_each(scene->geometry.begin(), scene->geometry.end(), [&](Geometry *geom) {
+      if (progress.get_cancel()) {
+        return;
+      }
+
       if (geom->is_mesh() || geom->is_volume()) {
         Mesh *mesh = static_cast<Mesh *>(geom);
 
@@ -76,12 +88,16 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
 
         if (mesh->triangles_is_modified() || copy_all_data) {
           mesh->pack_triangles(&tri_vindex[mesh->prim_offset]);
-        }
-
-        if (progress.get_cancel()) {
-          return;
+          /* Prism shell (research prototype): adjacency depends only on
+           * triangle topology, same as pack_triangles above, so it's
+           * recomputed under the exact same condition. */
+          mesh->pack_adjacency(&tri_adjacency[mesh->prim_offset], mesh->prim_offset);
         }
       }
+    });
+
+    if (progress.get_cancel()) {
+      return;
     }
 
     /* vertex coordinates */
@@ -89,6 +105,7 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
 
     dscene->tri_shader.copy_to_device_if_modified();
     dscene->tri_vindex.copy_to_device_if_modified();
+    dscene->tri_adjacency.copy_to_device_if_modified();
   }
 
   if (curve_segment_size != 0) {

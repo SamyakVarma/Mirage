@@ -729,6 +729,14 @@ enum PrimitiveType {
 
   PRIMITIVE_ANY_POINT = (PRIMITIVE_POINT | PRIMITIVE_GSPLAT),
 
+  /* Prism shell (research prototype): a synthetic Embree user-geometry
+   * primitive extruded above a JoySkin object's real surface, hit by
+   * ordinary rays via the same closest-hit search as real geometry.
+   * Deliberately left out of PRIMITIVE_ALL/PRIMITIVE_NUM_SHAPES for now --
+   * Stage 0 bypasses the generic attribute/shape-indexing system entirely
+   * (see integrate_surface's early-out), so it doesn't need a slot there. */
+  PRIMITIVE_PRISM = (1 << 8),
+
   PRIMITIVE_NUM_SHAPES = 7,
   PRIMITIVE_NUM_BITS = PRIMITIVE_NUM_SHAPES + 1, /* All shapes + motion bit. */
   PRIMITIVE_NUM = PRIMITIVE_NUM_SHAPES * 2,      /* With and without motion. */
@@ -1499,6 +1507,26 @@ struct KernelObject {
   float shadow_terminator_geometry_offset;
 
   float ao_distance;
+
+  /* Prism shell (research prototype, see PRIMITIVE_PRISM): aura thickness
+   * above this object's real surface (also used as the emission density
+   * falloff radius, see kernel/util/math_prism.h). <= 0 means disabled. */
+  float prism_shell_thickness;
+  /* Emission strength multiplier for the prism shell; color comes from the
+   * object's existing Color property (kobject.color). */
+  float prism_shell_strength;
+  /* Exponent on the clamped-linear falloff density(height) = clamp(1 -
+   * height/thickness, 0, 1)^power used by prism_density_integral (see
+   * kernel/util/math_prism.h). power == 1 is a plain linear ramp; higher
+   * values concentrate brightness closer to the surface (steeper falloff);
+   * lower values (down to > 0) keep it brighter for longer before dropping
+   * to 0 right at the shell boundary. */
+  float prism_falloff_power;
+  /* Research prototype: when non-zero, per-crossing glow contributions are
+   * combined with max() instead of being summed and then capped -- a
+   * cheaper approximation that avoids brightness stacking entirely instead
+   * of relying on the surface_cap ceiling (see shade_surface.h). */
+  int prism_approximate;
 
   int lightgroup;
 

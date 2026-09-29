@@ -63,6 +63,33 @@ KERNEL_STRUCT_MEMBER(path,
                      KERNEL_FEATURE_PATH_TRACING)
 /* Throughput. */
 KERNEL_STRUCT_MEMBER(path, PackedSpectrum, throughput, KERNEL_FEATURE_PATH_TRACING)
+/* Prism shell (research prototype, see PRIMITIVE_PRISM): running sum of
+ * every prism crossing's density-integrated glow contribution along this
+ * path, fog/volume-style -- each crossing adds its own segment integral
+ * (see prism_density_integral in kernel/util/math_prism.h) regardless of
+ * which object it belongs to, so overlapping shells naturally accumulate
+ * brightness the way real overlapping fog would. Flushed to the film once
+ * the path finally resolves to a real surface or the background (see
+ * kernel/integrator/shade_surface.h / shade_background.h), not per
+ * crossing. */
+KERNEL_STRUCT_MEMBER(path, PackedSpectrum, prism_accum_L, KERNEL_FEATURE_PATH_TRACING)
+/* Prism shell: number of prism crossings so far in the current unbroken
+ * burst (reset once the burst resolves to a real surface or the
+ * background -- see shade_surface.h / shade_background.h). Used purely as
+ * a safety backstop: past PRISM_MAX_CROSSINGS (math_prism.h), the ray
+ * gives up on prisms entirely for the rest of this burst via
+ * PRISM_DISABLE_ALL_TAG, guaranteeing it actually resolves instead of
+ * potentially needing an unbounded number of further crossings to clear a
+ * dense overlap region. */
+KERNEL_STRUCT_MEMBER(path, uint16_t, prism_crossings, KERNEL_FEATURE_PATH_TRACING)
+/* Prism shell: object index of the most recently crossed prism shell along
+ * this path (-1 if none yet). Checked when the path finally reaches a real
+ * surface (shade_surface.h): if that surface belongs to this SAME object,
+ * the accumulated glow is discarded instead of flushed to the film --
+ * research-prototype experiment to suppress an artifact from the shell's
+ * own glow stacking against that same object's own surface shading. A
+ * background hit or a different object's surface still flushes normally. */
+KERNEL_STRUCT_MEMBER(path, int, prism_last_object, KERNEL_FEATURE_PATH_TRACING)
 /* Factor to multiple with throughput to get remove any guiding PDFS.
  * Such throughput without guiding PDFS is used for Russian roulette termination. */
 KERNEL_STRUCT_MEMBER(path, float, unguided_throughput, KERNEL_FEATURE_PATH_GUIDING)

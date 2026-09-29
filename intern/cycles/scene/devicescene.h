@@ -29,6 +29,7 @@ class DeviceScene {
   device_vector<uint> tri_shader;
   device_vector<packed_uint3> tri_vindex;
   device_vector<packed_float3> tri_verts;
+  device_vector<packed_int3> tri_adjacency;
 
   device_vector<KernelCurve> curves;
   device_vector<float4> curve_keys;

@@ -1448,6 +1448,36 @@ class CYCLES_OBJECT_PT_shading_caustics(CyclesButtonsPanel, Panel):
         col.prop(cob, "is_caustics_receiver")
 
 
+class CYCLES_OBJECT_PT_prism_shell(CyclesButtonsPanel, Panel):
+    bl_label = "Prism Shell (research)"
+    bl_parent_id = "OBJECT_PT_shading"
+    bl_context = "object"
+    bl_options = {'DEFAULT_CLOSED'}
+
+    @classmethod
+    def poll(cls, context):
+        return CyclesButtonsPanel.poll(context) and context.object.type == 'MESH'
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+
+        ob = context.object
+        cob = ob.cycles
+
+        col = layout.column()
+        col.prop(cob, "use_prism_shell")
+        sub = col.column()
+        sub.active = cob.use_prism_shell
+        sub.prop(cob, "prism_shell_thickness")
+        sub.prop(cob, "prism_shell_strength")
+        sub.prop(cob, "prism_falloff_power")
+        sub.prop(cob, "prism_approximate")
+        if cob.use_prism_shell:
+            sub.prop(ob, "color", text="Glow Color")
+
+
 class CYCLES_OBJECT_PT_lightgroup(CyclesButtonsPanel, Panel):
     bl_label = "Light Group"
     bl_parent_id = "OBJECT_PT_shading"
@@ -2647,6 +2677,7 @@ classes = (
     CYCLES_OBJECT_PT_motion_blur,
     CYCLES_OBJECT_PT_shading_gi_approximation,
     CYCLES_OBJECT_PT_shading_caustics,
+    CYCLES_OBJECT_PT_prism_shell,
     CYCLES_OBJECT_PT_lightgroup,
     CYCLES_OBJECT_PT_visibility,
     CYCLES_OBJECT_PT_visibility_ray_visibility,

@@ -139,6 +139,36 @@ ccl_device_inline void triangle_vertices_and_normals(KernelGlobals kg,
   attribute_data_fetch_normals(kg, normal_offset, i0, i1, i2, N);
 }
 
+/* Same as above, for use before a ShaderData exists yet (e.g. inside a
+ * custom BVH intersection callback, where only the raw object/prim are
+ * known). */
+ccl_device_inline void triangle_vertices_and_normals(
+    KernelGlobals kg, const int object, const int prim, float3 P[3], float3 N[3])
+{
+  const int position_offset = kernel_data_fetch(objects, object).position_offset;
+  const uint3 tri_vindex = kernel_data_fetch(tri_vindex, prim);
+  P[0] = kernel_data_fetch(tri_verts, position_offset + tri_vindex.x);
+  P[1] = kernel_data_fetch(tri_verts, position_offset + tri_vindex.y);
+  P[2] = kernel_data_fetch(tri_verts, position_offset + tri_vindex.z);
+
+  const int normal_offset = kernel_data_fetch(objects, object).mesh_volume.normal_offset;
+  const uint object_flag = kernel_data_fetch(object_flag, object);
+  int i0, i1, i2;
+
+  if (object_flag & SD_OBJECT_HAS_CORNER_NORMALS) {
+    i0 = prim * 3 + 0;
+    i1 = prim * 3 + 1;
+    i2 = prim * 3 + 2;
+  }
+  else {
+    i0 = tri_vindex.x;
+    i1 = tri_vindex.y;
+    i2 = tri_vindex.z;
+  }
+
+  attribute_data_fetch_normals(kg, normal_offset, i0, i1, i2, N);
+}
+
 /* Interpolate smooth vertex normal from vertices */
 
 ccl_device_inline float3 triangle_smooth_normal(

@@ -14,6 +14,7 @@
 #include "kernel/geom/motion_triangle_shader.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/point_intersect.h"
+#include "kernel/geom/prism.h"
 #include "kernel/geom/triangle_intersect.h"
 
 #include "kernel/sample/pattern.h"
@@ -91,6 +92,12 @@ ccl_device_inline
   }
   else
 #endif
+      if (sd->type & PRIMITIVE_PRISM)
+  {
+    /* prism shell (research prototype) */
+    prism_shader_setup(kg, sd, isect, ray);
+  }
+  else
   {
     if (sd->type == PRIMITIVE_TRIANGLE) {
       /* static triangle */

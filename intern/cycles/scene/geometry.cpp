@@ -640,6 +640,7 @@ void GeometryManager::device_update_preprocess(Device *device, Scene *scene, Pro
     if (device_update_flags & DEVICE_MESH_DATA_NEEDS_REALLOC) {
       dscene->tri_vindex.tag_realloc();
       dscene->tri_shader.tag_realloc();
+      dscene->tri_adjacency.tag_realloc();
     }
 
     if (device_update_flags & DEVICE_CURVE_DATA_NEEDS_REALLOC) {
@@ -1247,6 +1248,7 @@ void GeometryManager::device_update(Device *device,
   dscene->prim_time.clear_modified();
   dscene->tri_shader.clear_modified();
   dscene->tri_vindex.clear_modified();
+  dscene->tri_adjacency.clear_modified();
   dscene->tri_verts.clear_modified();
   dscene->curves.clear_modified();
   dscene->curve_keys.clear_modified();
@@ -1276,6 +1278,7 @@ void GeometryManager::device_free(Device *device, DeviceScene *dscene, bool forc
   dscene->prim_time.free_if_need_realloc(force_free);
   dscene->tri_shader.free_if_need_realloc(force_free);
   dscene->tri_vindex.free_if_need_realloc(force_free);
+  dscene->tri_adjacency.free_if_need_realloc(force_free);
   dscene->tri_verts.free_if_need_realloc(force_free);
   dscene->curves.free_if_need_realloc(force_free);
   dscene->curve_keys.free_if_need_realloc(force_free);

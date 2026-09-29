@@ -239,9 +239,10 @@ RTCError BVHEmbree::offload_scenes_to_gpu(const vector<RTCScene> &scenes)
 void BVHEmbree::add_object(Object *ob, const int i)
 {
   Geometry *geom = ob->get_geometry();
+  Mesh *mesh = nullptr;
 
   if (geom->is_mesh() || geom->is_volume()) {
-    Mesh *mesh = static_cast<Mesh *>(geom);
+    mesh = static_cast<Mesh *>(geom);
     if (mesh->num_triangles() > 0) {
       add_triangles(ob, mesh, i);
     }
@@ -262,6 +263,18 @@ void BVHEmbree::add_object(Object *ob, const int i)
         add_gsplats(ob, pointcloud, i);
       }
     }
+  }
+
+  /* Prism shell (research prototype): a second, synthetic user-geometry
+   * attached alongside the object's real geometry above, not a replacement
+   * for it -- Cycles' Object/Geometry model is 1:1 and has no precedent for
+   * one Object owning two primitive kinds, but Embree itself doesn't care;
+   * this reuses the "+1" geom-ID slot that add_curves() uses for hair,
+   * which is unused for a plain triangle-mesh object like a JoySkin surface. */
+  if (mesh != nullptr && mesh->num_triangles() > 0 && ob->get_use_prism_shell() &&
+      ob->get_prism_shell_thickness() > 0.0f)
+  {
+    add_prism_shell(ob, mesh, i);
   }
 }
 
@@ -384,6 +397,113 @@ void BVHEmbree::add_triangles(const Object *ob, const Mesh *mesh, const int i)
   rtcCommitGeometry(geom_id);
   rtcAttachGeometryByID(scene, geom_id, i * 2);
   rtcReleaseGeometry(geom_id);
+}
+
+static void prism_bounds_func(const RTCBoundsFunctionArguments *args)
+{
+  const auto *data = (const BVHEmbreePrismUserData *)args->geometryUserPtr;
+  const float h = data->thickness;
+
+  /* args->primID is local to this user geometry, and this geometry has
+   * exactly one primitive per source triangle in the same order as the
+   * mesh's own triangle array, so it can be used directly (no prim_offset
+   * needed -- that's only for the flat, scene-wide arrays the kernel reads
+   * via kernel_data_fetch). data->triangles/verts are pre-resolved once in
+   * add_prism_shell(), not looked up here -- see the struct comment in
+   * bvh/embree.h for why. */
+  const int tri = args->primID;
+  const int i0 = data->triangles[tri * 3 + 0];
+  const int i1 = data->triangles[tri * 3 + 1];
+  const int i2 = data->triangles[tri * 3 + 2];
+
+  const float3 P0 = float3(data->verts[i0]);
+  const float3 P1 = float3(data->verts[i1]);
+  const float3 P2 = float3(data->verts[i2]);
+
+  /* The kernel side now extrudes each vertex along its own PER-VERTEX
+   * normal (see math_prism.h), not a single shared face normal -- but
+   * those normals aren't readily available here on the host/build side the
+   * way the shared position/index buffers are. Rather than plumbing a
+   * third buffer through just for this bound, start from the same tight
+   * box a single-shared-normal prism would use (extruded along the
+   * triangle's own face normal, matching the original design almost
+   * exactly for typical smooth meshes where vertex normals stay close to
+   * it), then pad by a modest safety margin for vertex normals deviating
+   * from it -- NOT a full extra `thickness` in all 6 directions
+   * unconditionally, which roughly triples this box's volume and, in
+   * overlap-heavy scenes, was confirmed to make Embree test dramatically
+   * more (mostly false-positive) prism candidates per ray, a serious
+   * performance regression. Half the thickness is generous headroom for
+   * ordinary vertex-normal variation without reintroducing that blowup. */
+  const float3 Nface = normalize(cross(P1 - P0, P2 - P0));
+  const float3 top_offset = h * Nface;
+
+  float3 bmin = min(min(P0, P1), P2);
+  float3 bmax = max(max(P0, P1), P2);
+  bmin = min(bmin, min(min(P0 + top_offset, P1 + top_offset), P2 + top_offset));
+  bmax = max(bmax, max(max(P0 + top_offset, P1 + top_offset), P2 + top_offset));
+
+  const float3 margin = make_float3(h, h, h) * 0.5f;
+  bmin -= margin;
+  bmax += margin;
+
+  RTCBounds *bounds_o = args->bounds_o;
+  bounds_o->lower_x = bmin.x;
+  bounds_o->lower_y = bmin.y;
+  bounds_o->lower_z = bmin.z;
+  bounds_o->upper_x = bmax.x;
+  bounds_o->upper_y = bmax.y;
+  bounds_o->upper_z = bmax.z;
+}
+
+void BVHEmbree::add_prism_shell(const Object *ob, const Mesh *mesh, const int i)
+{
+  /* Prism shell (research prototype): one user-geometry primitive per
+   * source triangle, extruded along its own per-vertex normals by the
+   * shell thickness (see kernel/util/math_prism.h for why per-vertex
+   * rather than a single shared face normal). Registered as a real
+   * closest-hit candidate in the same BVH as the object's real triangles --
+   * see
+   * kernel_embree_prism_intersect_func_impl in kernel/device/cpu/bvh.h for
+   * the actual per-ray geometry test. Attached at the "i * 2 + 1" slot that
+   * add_curves() normally uses for hair, which is unused for a plain
+   * triangle-mesh object. */
+  auto data = make_unique<BVHEmbreePrismUserData>();
+  data->thickness = ob->get_prism_shell_thickness();
+  /* Resolved once here rather than in prism_bounds_func -- see the struct
+   * comment in bvh/embree.h. Both pointers point into the Mesh's own
+   * long-lived storage (same lifetime guarantee add_triangles() already
+   * relies on for its shared vertex/index buffers), so they stay valid for
+   * as long as this BVH does. */
+  data->triangles = mesh->get_triangles().data();
+  const Attribute *attr_P = mesh->attributes.find(ATTR_STD_POSITION);
+  data->verts = attr_P->data_at_time_step<packed_float3>(0, 1);
+
+  RTCGeometry geom_id = rtcNewGeometry(rtc_device, RTC_GEOMETRY_TYPE_USER);
+  rtcSetGeometryUserPrimitiveCount(geom_id, mesh->num_triangles());
+  rtcSetGeometryUserData(geom_id, data.get());
+  rtcSetGeometryBoundsFunction(geom_id, prism_bounds_func, nullptr);
+  /* Exclude shadow-ray visibility entirely. This is more than an
+   * optimization: scene_intersect_shadow() (bvh/bvh.h), used for plain
+   * opaque shadow rays -- i.e. any ordinary non-transparent material's NEE
+   * shadow test -- does NOT go through the occluded-function machinery at
+   * all. It just reuses the main closest-hit search (scene_intersect) and
+   * treats "found any hit" as "occluded". Since the prism registers as a
+   * real closest-hit candidate, every shadow ray that happened to graze a
+   * prism on its way to a light was being counted as blocked, killing
+   * direct lighting near geometry edges -- confirmed as the cause of a
+   * dark band that survived several rounds of unrelated fixes. Masking out
+   * the shadow bits here makes Embree skip prisms during shadow-ray BVH
+   * traversal entirely, at the source, for every shadow-testing path
+   * (opaque and transparent alike), not just the one(s) this file's own
+   * occluded-function callbacks happen to guard. */
+  rtcSetGeometryMask(geom_id, ob->visibility_for_tracing() & ~PATH_RAY_VISIBILITY_SHADOW);
+
+  rtcCommitGeometry(geom_id);
+  rtcAttachGeometryByID(scene, geom_id, i * 2 + 1);
+  rtcReleaseGeometry(geom_id);
+
+  prism_geom_data.push_back(std::move(data));
 }
 
 void BVHEmbree::set_tri_vertex_buffer(RTCGeometry geom_id, const Mesh *mesh, const bool update)

@@ -211,6 +211,14 @@ class Mesh : public Geometry {
 
   void pack_shaders(Scene *scene, uint *shader);
   void pack_triangles(packed_uint3 *tri_vindex);
+  /* Prism shell (research prototype): per-triangle edge adjacency -- see
+   * the tri_adjacency comment in kernel/data_arrays.h. Neighbor indices
+   * are resolved mesh-locally, then written out already offset into the
+   * scene-wide prim index space (adding prim_offset, the same offset the
+   * caller already applies to the output pointer itself for tri_vindex)
+   * so kernel code can use them directly as global prim indices without
+   * any extra step. */
+  void pack_adjacency(packed_int3 *tri_adjacency, const int prim_offset);
 
   bool has_motion_blur() const override;
   PrimitiveType primitive_type() const override;

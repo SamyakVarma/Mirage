@@ -35,6 +35,14 @@ KERNEL_DATA_ARRAY(DecomposedTransform, camera_motion)
 KERNEL_DATA_ARRAY(uint, tri_shader)
 KERNEL_DATA_ARRAY(packed_uint3, tri_vindex)
 KERNEL_DATA_ARRAY(packed_float3, tri_verts)
+/* Prism shell (research prototype): per-triangle edge adjacency, indexed
+ * the same way as tri_vindex (global prim index). For each of a triangle's
+ * 3 edges (0: v0-v1, 1: v1-v2, 2: v2-v0), the global prim index of the
+ * other triangle sharing that edge, or -1 if it's an open/boundary edge.
+ * Lets a prism crossing that exits through a shared edge jump straight to
+ * the known neighbor (kernel/integrator/shade_surface.h) instead of
+ * re-entering the BVH closest-hit search for something already known. */
+KERNEL_DATA_ARRAY(packed_int3, tri_adjacency)
 
 /* curves */
 KERNEL_DATA_ARRAY(KernelCurve, curves)

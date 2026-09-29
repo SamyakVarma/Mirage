@@ -300,6 +300,12 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   }
   object->set_ao_distance(ao_distance);
 
+  object->set_use_prism_shell(get_boolean(cobject, "use_prism_shell"));
+  object->set_prism_shell_thickness(get_float(cobject, "prism_shell_thickness"));
+  object->set_prism_shell_strength(get_float(cobject, "prism_shell_strength"));
+  object->set_prism_falloff_power(get_float(cobject, "prism_falloff_power"));
+  object->set_prism_approximate(get_boolean(cobject, "prism_approximate"));
+
   const bool is_caustics_caster = get_boolean(cobject, "is_caustics_caster");
   object->set_is_caustics_caster(is_caustics_caster);
 

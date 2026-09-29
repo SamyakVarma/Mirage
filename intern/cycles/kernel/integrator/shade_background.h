@@ -155,6 +155,20 @@ ccl_device_inline ShaderEvalResult integrate_background(
     L *= mis_weight;
   }
 
+  /* Prism shell (research prototype): this ray left the scene without
+   * hitting a real surface -- flush whatever aura value(s) it picked up
+   * crossing prisms along the way (see the matching flush + explanation in
+   * shade_surface.h's prism branch / real-surface flush). */
+  {
+    const Spectrum prism_total = INTEGRATOR_STATE(state, path, prism_accum_L);
+    if (!is_zero(prism_total)) {
+      film_write_surface_emission(kg, state, prism_total, 1.0f, render_buffer);
+      INTEGRATOR_STATE_WRITE(state, path, prism_accum_L) = zero_spectrum();
+    }
+    INTEGRATOR_STATE_WRITE(state, path, prism_crossings) = 0;
+    INTEGRATOR_STATE_WRITE(state, path, prism_last_object) = -1;
+  }
+
   /* Write to render buffer. */
   film_write_background(kg, state, L, transparent, is_transparent_background_ray, render_buffer);
   film_write_data_passes_background(kg, state, render_buffer);

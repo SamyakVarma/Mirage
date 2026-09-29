@@ -143,6 +143,7 @@ set(SRC_KERNEL_GEOM_HEADERS
   geom/point.h
   geom/point_intersect.h
   geom/primitive.h
+  geom/prism.h
   geom/shader_data.h
   geom/triangle.h
   geom/triangle_intersect.h
@@ -249,6 +250,7 @@ set(SRC_KERNEL_UTIL_HEADERS
   util/image_2d.h
   util/image_3d.h
   util/lookup_table.h
+  util/math_prism.h
   util/nanovdb.h
   util/profiler.h
 )
