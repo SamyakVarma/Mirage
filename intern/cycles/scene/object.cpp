@@ -109,6 +109,15 @@ NODE_DEFINE(Object)
   SOCKET_FLOAT(prism_shell_strength, "Prism Shell Strength", 1.0f);
   SOCKET_FLOAT(prism_falloff_power, "Prism Falloff Power", 2.0f);
   SOCKET_BOOLEAN(prism_approximate, "Prism Approximate", false);
+  SOCKET_FLOAT(prism_sparkle_strength, "Prism Sparkle Strength", 0.0f);
+  SOCKET_FLOAT(prism_sparkle_max_brightness, "Prism Sparkle Max Brightness", 1.0f);
+  SOCKET_FLOAT(prism_sparkle_cell_size, "Prism Sparkle Cell Size", 0.1f);
+  SOCKET_FLOAT(prism_sparkle_max_dist, "Prism Sparkle Max Distance", 0.55f);
+  SOCKET_FLOAT(prism_sparkle_radius_near, "Prism Sparkle Radius Near", 0.045f);
+  SOCKET_FLOAT(prism_sparkle_radius_far, "Prism Sparkle Radius Far", 0.008f);
+  SOCKET_FLOAT(prism_sparkle_keep_near, "Prism Sparkle Keep Near", 0.95f);
+  SOCKET_FLOAT(prism_sparkle_keep_far, "Prism Sparkle Keep Far", 0.015f);
+  SOCKET_BOOLEAN(prism_backface_culling, "Prism Backface Culling", true);
 
   SOCKET_STRING(lightgroup, "Light Group", ustring());
   SOCKET_UINT(receiver_light_set, "Light Set Index", 0);
@@ -613,6 +622,15 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.prism_shell_strength = ob->get_prism_shell_strength();
   kobject.prism_falloff_power = ob->get_prism_falloff_power();
   kobject.prism_approximate = ob->get_prism_approximate() ? 1 : 0;
+  kobject.prism_sparkle_strength = ob->get_prism_sparkle_strength();
+  kobject.prism_sparkle_max_brightness = ob->get_prism_sparkle_max_brightness();
+  kobject.prism_sparkle_cell_size = ob->get_prism_sparkle_cell_size();
+  kobject.prism_sparkle_max_dist = ob->get_prism_sparkle_max_dist();
+  kobject.prism_sparkle_radius_near = ob->get_prism_sparkle_radius_near();
+  kobject.prism_sparkle_radius_far = ob->get_prism_sparkle_radius_far();
+  kobject.prism_sparkle_keep_near = ob->get_prism_sparkle_keep_near();
+  kobject.prism_sparkle_keep_far = ob->get_prism_sparkle_keep_far();
+  kobject.prism_backface_culling = ob->get_prism_backface_culling() ? 1 : 0;
   kobject.receiver_light_set = ob->receiver_light_set >= LIGHT_LINK_SET_MAX ?
                                    0 :
                                    ob->receiver_light_set;

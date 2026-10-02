@@ -1572,6 +1572,90 @@ class CyclesObjectSettings(bpy.types.PropertyGroup):
         update=update_prism_shell,
     )
 
+    prism_sparkle_strength: FloatProperty(
+        name="Sparkle Strength",
+        description="Research prototype: additive sparse field of small glow points scattered "
+        "near the surface, on top of the prism shell's own continuous glow. 0 disables it",
+        min=0.0,
+        default=0.0,
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_max_brightness: FloatProperty(
+        name="Sparkle Max Brightness",
+        description="Brightness ceiling for the sparkle field's own blobs, independent of the "
+        "prism shell's own strength -- lets blobs stay fully visible even with the "
+        "continuous aura glow turned off",
+        min=0.0,
+        default=1.0,
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_cell_size: FloatProperty(
+        name="Sparkle Cell Size",
+        description="Grid spacing for the sparkle field -- roughly the typical distance "
+        "between neighboring sparkle points",
+        min=0.001,
+        default=0.1,
+        subtype='DISTANCE',
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_max_dist: FloatProperty(
+        name="Sparkle Max Distance",
+        description="Distance from the surface at which the sparkle field has fully died out",
+        min=0.001,
+        default=0.55,
+        subtype='DISTANCE',
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_radius_near: FloatProperty(
+        name="Sparkle Radius Near",
+        description="Sparkle sphere radius right at the surface",
+        min=0.0001,
+        default=0.045,
+        subtype='DISTANCE',
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_radius_far: FloatProperty(
+        name="Sparkle Radius Far",
+        description="Sparkle sphere radius at Sparkle Max Distance",
+        min=0.0001,
+        default=0.008,
+        subtype='DISTANCE',
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_keep_near: FloatProperty(
+        name="Sparkle Density Near",
+        description="Probability a sparkle cell survives right at the surface -- higher means "
+        "denser, more overlapping spheres near the skin",
+        min=0.0, max=1.0,
+        default=0.95,
+        update=update_prism_shell,
+    )
+
+    prism_sparkle_keep_far: FloatProperty(
+        name="Sparkle Density Far",
+        description="Probability a sparkle cell survives at Sparkle Max Distance -- lower "
+        "means sparser, more isolated floating points far from the skin",
+        min=0.0, max=1.0,
+        default=0.015,
+        update=update_prism_shell,
+    )
+
+    prism_backface_culling: BoolProperty(
+        name="Backface Culling",
+        description="Discard the accumulated glow when a ray passes through this object's own "
+        "prism shell and then hits this SAME object's real surface. Uncheck to keep and flush "
+        "that glow too instead of only crediting rays that end up elsewhere (a different "
+        "object, or the background)",
+        default=True,
+        update=update_prism_shell,
+    )
+
     is_caustics_caster: BoolProperty(
         name="Cast Shadow Caustics",
         description="With refractive materials, generate approximate caustics in shadows of this object. "

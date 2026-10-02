@@ -1528,6 +1528,32 @@ struct KernelObject {
    * of relying on the surface_cap ceiling (see shade_surface.h). */
   int prism_approximate;
 
+  /* Joy skin sparkle field (research prototype, see kernel/util/
+   * math_sparkle.h): a sparse scatter of small glow points near the
+   * surface, additive on top of the prism shell's own continuous glow.
+   * 0 strength means the whole field is skipped entirely. */
+  float prism_sparkle_strength;
+  /* Fixed brightness ceiling for the sparkle field, independent of the
+   * aura's own strength -- see surface_cap's own comment in
+   * shade_surface.h for why this needs to be independent rather than
+   * derived from the aura's hue or a blob's own borrowed color. */
+  float prism_sparkle_max_brightness;
+  float prism_sparkle_cell_size;
+  float prism_sparkle_max_dist;
+  float prism_sparkle_radius_near;
+  float prism_sparkle_radius_far;
+  float prism_sparkle_keep_near;
+  float prism_sparkle_keep_far;
+
+  /* Research prototype: when non-zero (default), a ray that passes through
+   * this object's own prism shell and then hits this SAME object's real
+   * surface has its accumulated glow discarded instead of flushed (see the
+   * real-surface flush in shade_surface.h) -- "culling" the contribution of
+   * rays that end up hitting the mesh itself, as if the shell were backface
+   * -culled relative to its own surface. When 0, that glow is kept and
+   * flushed normally regardless of which object the ray lands on. */
+  int prism_backface_culling;
+
   int lightgroup;
 
   uint visibility;

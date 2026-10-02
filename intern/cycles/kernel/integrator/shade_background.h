@@ -20,6 +20,7 @@
 #include "kernel/geom/shader_data.h"
 
 #include "kernel/types.h"
+#include "kernel/util/colorspace.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -158,15 +159,38 @@ ccl_device_inline ShaderEvalResult integrate_background(
   /* Prism shell (research prototype): this ray left the scene without
    * hitting a real surface -- flush whatever aura value(s) it picked up
    * crossing prisms along the way (see the matching flush + explanation in
-   * shade_surface.h's prism branch / real-surface flush). */
+   * shade_surface.h's prism branch / real-surface flush).
+   *
+   * Backface culling applies here too, using prism_depart_object (the
+   * object the CURRENT ray segment departed from, set in shade_surface.h)
+   * in place of "the object just hit" -- there is no real surface here to
+   * compare against. Without this, a diffuse bounce ray leaving a point
+   * right next to a sharp mesh edge, grazing back through that same
+   * object's own adjacent-face prism and then escaping straight to the
+   * background, would flush that self-graze glow unconditionally even with
+   * backface_culling on -- visible as a faint glow seam tracing the mesh's
+   * edges. A fresh camera ray (prism_depart_object still -1, hasn't
+   * departed from any object) is exempt, since that is the intended
+   * silhouette rim glow. */
   {
     const Spectrum prism_total = INTEGRATOR_STATE(state, path, prism_accum_L);
     if (!is_zero(prism_total)) {
-      film_write_surface_emission(kg, state, prism_total, 1.0f, render_buffer);
+      const int prism_last_object = INTEGRATOR_STATE(state, path, prism_last_object);
+      const int prism_depart_object = INTEGRATOR_STATE(state, path, prism_depart_object);
+      bool same_object_culled = false;
+      if (prism_depart_object >= 0 && prism_last_object == prism_depart_object) {
+        const ccl_global KernelObject &depart_kobject = kernel_data_fetch(objects,
+                                                                           prism_depart_object);
+        same_object_culled = depart_kobject.prism_backface_culling != 0;
+      }
+      if (!same_object_culled) {
+        film_write_surface_emission(kg, state, prism_total, 1.0f, render_buffer);
+      }
       INTEGRATOR_STATE_WRITE(state, path, prism_accum_L) = zero_spectrum();
     }
     INTEGRATOR_STATE_WRITE(state, path, prism_crossings) = 0;
     INTEGRATOR_STATE_WRITE(state, path, prism_last_object) = -1;
+    INTEGRATOR_STATE_WRITE(state, path, prism_depart_object) = -1;
   }
 
   /* Write to render buffer. */

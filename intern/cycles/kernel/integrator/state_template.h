@@ -84,12 +84,34 @@ KERNEL_STRUCT_MEMBER(path, PackedSpectrum, prism_accum_L, KERNEL_FEATURE_PATH_TR
 KERNEL_STRUCT_MEMBER(path, uint16_t, prism_crossings, KERNEL_FEATURE_PATH_TRACING)
 /* Prism shell: object index of the most recently crossed prism shell along
  * this path (-1 if none yet). Checked when the path finally reaches a real
- * surface (shade_surface.h): if that surface belongs to this SAME object,
- * the accumulated glow is discarded instead of flushed to the film --
- * research-prototype experiment to suppress an artifact from the shell's
- * own glow stacking against that same object's own surface shading. A
- * background hit or a different object's surface still flushes normally. */
+ * surface (shade_surface.h) or the background (shade_background.h): if that
+ * surface belongs to this SAME object (or, for the background, if this
+ * SAME object is the one the current ray segment departed from -- see
+ * prism_depart_object below), the accumulated glow is discarded instead of
+ * flushed to the film -- research-prototype experiment to suppress an
+ * artifact from the shell's own glow stacking against that same object's
+ * own surface shading. A different object's surface, or escaping to the
+ * background without having departed from this object, still flushes
+ * normally. */
 KERNEL_STRUCT_MEMBER(path, int, prism_last_object, KERNEL_FEATURE_PATH_TRACING)
+/* Prism shell: object index of the real surface the CURRENT ray segment
+ * departed from (-1 for a fresh camera ray, which hasn't departed from any
+ * object yet). Set whenever a real surface is shaded (shade_surface.h),
+ * right before that shading spawns whatever ray(s) continue the path.
+ *
+ * This exists specifically for the background-hit case: a diffuse bounce
+ * ray leaving a surface point right next to a sharp mesh edge very often
+ * grazes back through that SAME object's own prism shell (the adjacent
+ * face's shell is right there) before escaping to the background with no
+ * further real-surface hit at all. shade_background.h has no "surface just
+ * hit" to compare prism_last_object against the way shade_surface.h does,
+ * so it uses this field instead -- otherwise that self-graze glow would
+ * flush unconditionally regardless of prism_backface_culling, showing up as
+ * a faint glow seam tracing the mesh's edges even with culling enabled. A
+ * fresh camera ray's own prism-to-background crossing (prism_depart_object
+ * still -1) is deliberately exempt, since that is the intended silhouette
+ * rim glow, not a self-graze artifact. */
+KERNEL_STRUCT_MEMBER(path, int, prism_depart_object, KERNEL_FEATURE_PATH_TRACING)
 /* Factor to multiple with throughput to get remove any guiding PDFS.
  * Such throughput without guiding PDFS is used for Russian roulette termination. */
 KERNEL_STRUCT_MEMBER(path, float, unguided_throughput, KERNEL_FEATURE_PATH_GUIDING)

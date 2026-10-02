@@ -305,6 +305,15 @@ Object *BlenderSync::sync_object(blender::ViewLayer &b_view_layer,
   object->set_prism_shell_strength(get_float(cobject, "prism_shell_strength"));
   object->set_prism_falloff_power(get_float(cobject, "prism_falloff_power"));
   object->set_prism_approximate(get_boolean(cobject, "prism_approximate"));
+  object->set_prism_sparkle_strength(get_float(cobject, "prism_sparkle_strength"));
+  object->set_prism_sparkle_max_brightness(get_float(cobject, "prism_sparkle_max_brightness"));
+  object->set_prism_sparkle_cell_size(get_float(cobject, "prism_sparkle_cell_size"));
+  object->set_prism_sparkle_max_dist(get_float(cobject, "prism_sparkle_max_dist"));
+  object->set_prism_sparkle_radius_near(get_float(cobject, "prism_sparkle_radius_near"));
+  object->set_prism_sparkle_radius_far(get_float(cobject, "prism_sparkle_radius_far"));
+  object->set_prism_sparkle_keep_near(get_float(cobject, "prism_sparkle_keep_near"));
+  object->set_prism_sparkle_keep_far(get_float(cobject, "prism_sparkle_keep_far"));
+  object->set_prism_backface_culling(get_boolean(cobject, "prism_backface_culling"));
 
   const bool is_caustics_caster = get_boolean(cobject, "is_caustics_caster");
   object->set_is_caustics_caster(is_caustics_caster);

@@ -68,6 +68,7 @@ ccl_device_inline void path_state_init_integrator(KernelGlobals kg,
   INTEGRATOR_STATE_WRITE(state, path, prism_accum_L) = zero_spectrum();
   INTEGRATOR_STATE_WRITE(state, path, prism_crossings) = 0;
   INTEGRATOR_STATE_WRITE(state, path, prism_last_object) = -1;
+  INTEGRATOR_STATE_WRITE(state, path, prism_depart_object) = -1;
 #if defined(__PATH_GUIDING__)
   if ((kernel_data.kernel_features & KERNEL_FEATURE_PATH_GUIDING)) {
     INTEGRATOR_STATE_WRITE(state, path, unguided_throughput) = 1.0f;

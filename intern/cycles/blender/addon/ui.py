@@ -1474,8 +1474,22 @@ class CYCLES_OBJECT_PT_prism_shell(CyclesButtonsPanel, Panel):
         sub.prop(cob, "prism_shell_strength")
         sub.prop(cob, "prism_falloff_power")
         sub.prop(cob, "prism_approximate")
+        sub.prop(cob, "prism_backface_culling")
         if cob.use_prism_shell:
             sub.prop(ob, "color", text="Glow Color")
+
+        sub.separator()
+        sub.label(text="Sparkle Field (additive)")
+        sub.prop(cob, "prism_sparkle_strength")
+        sparkle_sub = sub.column()
+        sparkle_sub.active = cob.prism_sparkle_strength > 0.0
+        sparkle_sub.prop(cob, "prism_sparkle_max_brightness")
+        sparkle_sub.prop(cob, "prism_sparkle_cell_size")
+        sparkle_sub.prop(cob, "prism_sparkle_max_dist")
+        sparkle_sub.prop(cob, "prism_sparkle_radius_near")
+        sparkle_sub.prop(cob, "prism_sparkle_radius_far")
+        sparkle_sub.prop(cob, "prism_sparkle_keep_near")
+        sparkle_sub.prop(cob, "prism_sparkle_keep_far")
 
 
 class CYCLES_OBJECT_PT_lightgroup(CyclesButtonsPanel, Panel):

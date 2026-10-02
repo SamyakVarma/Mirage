@@ -13,7 +13,9 @@
 
 #include "kernel/light/sample.h"
 
+#include "kernel/bvh/bvh.h"
 #include "kernel/geom/motion_triangle.h"
+#include "kernel/geom/shader_data.h"
 #include "kernel/geom/triangle.h"
 
 #include "kernel/integrator/guiding.h"
@@ -24,6 +26,7 @@
 #include "kernel/types.h"
 #include "kernel/util/colorspace.h"
 #include "kernel/util/math_prism.h"
+#include "kernel/util/math_sparkle.h"
 #include "util/math_intersect.h"
 
 CCL_NAMESPACE_BEGIN
@@ -813,6 +816,7 @@ ccl_device int integrate_surface(KernelGlobals kg,
     const float falloff_power = kobject.prism_falloff_power;
     const bool approximate = kobject.prism_approximate != 0;
     const float3 aura_color = make_float3(kobject.color[0], kobject.color[1], kobject.color[2]);
+    const float sparkle_strength = kobject.prism_sparkle_strength;
 
     Ray ray ccl_optional_struct_init;
     integrator_state_read_ray(state, &ray);
@@ -834,34 +838,22 @@ ccl_device int integrate_surface(KernelGlobals kg,
      * happened, so it's guaranteed not to have overshot the real surface
      * (see its use below). */
     float first_t_enter = 0.0f;
-    /* Guards against a fast-hop chain making no real forward progress
-     * along the ray. Confirmed via a diagnostic marker: two coplanar
-     * triangles sharing a flat quad's diagonal can misclassify the exit
-     * at that shared side plane (ray direction nearly parallel to it --
-     * a near-zero-denominator case) and hop back and forth into each
-     * other without ever actually advancing, silently burning through
-     * all of PRISM_MAX_CROSSINGS. Worse, give-up's tmin advance (based on
-     * whatever last_t_enter the oscillation left behind) could then
-     * overshoot past the real surface, dropping the ray through to the
-     * background entirely -- visible as a glowing seam exactly along
-     * that diagonal. Scaled by thickness since t is a world-space ray
-     * parameter and this effect's own spatial scale is the only
-     * meaningful reference for "did this hop actually go anywhere".
-     *
-     * A genuinely coplanar shared edge (like a flat quad's diagonal) has
-     * NO real forward distance to cross in the first place -- both
-     * triangles compute essentially the same entry point for a ray near
-     * that boundary, so any hop across it is inherently at the mercy of
-     * pure floating-point noise, never a meaningful geometric crossing.
-     * 1e-4 still let enough of that noise through to leave a faint
-     * residual seam (still overshooting on a single accepted hop, without
-     * needing to oscillate all the way to a full give-up); a real
-     * lateral hop onto a genuinely different, differently-angled triangle
-     * should clear a much larger bar than this even for a small mesh, so
-     * this is bumped up two more orders of magnitude to reject that noise
-     * more decisively. */
-    const float min_hop_progress = thickness * 1e-2f;
-    float prev_t_enter = -FLT_MAX;
+    /* Anti-oscillation guard: the triangle this chain just hopped FROM,
+     * so a dilemma (an exit that's genuinely ambiguous about which side
+     * of a shared edge it belongs to -- e.g. two coplanar triangles
+     * sharing a flat quad's diagonal, where the ray is nearly parallel to
+     * that shared side plane and both triangles compute essentially the
+     * same boundary) can be resolved by arbitrarily accepting whichever
+     * hop the geometry's own computation proposes and then STICKING with
+     * that choice: an immediate hop back to the triangle just left is
+     * refused (see below) rather than accepted, which is what the
+     * oscillation actually was -- bouncing back and forth between the
+     * same two triangles, silently burning through PRISM_MAX_CROSSINGS.
+     * A hop onward to any OTHER triangle is accepted normally, and this
+     * memory naturally resets to "no previous" for the next crossing a
+     * fresh dispatch starts, so a later, unrelated dilemma gets its own
+     * fresh arbitrary choice rather than being bound by this one. */
+    int prev_hop_prim = -1;
 
     for (;;) {
       /* Safety backstop: normally a ray resolves (hits a real surface or
@@ -910,85 +902,43 @@ ccl_device int integrate_surface(KernelGlobals kg,
         break;
       }
 
-      if (t_enter < prev_t_enter + min_hop_progress) {
-        /* No real forward progress since the last triangle in this chain
-         * -- stop here and keep whatever the last GOOD entry point was
-         * (any_geometry/last_t_enter are only updated below, once this
-         * check passes), rather than accept this crossing and risk
-         * hopping into an oscillation. Falls through to the normal
-         * search-based path exactly like any other unresolved exit. */
-        break;
-      }
-      prev_t_enter = t_enter;
-
       if (!any_geometry) {
         first_t_enter = t_enter;
       }
       any_geometry = true;
       last_t_enter = t_enter;
 
-      if (strength > 0.0f) {
-        /* Direct light: one NEE-style light sample at the entry point,
-         * deliberately WITHOUT a shadow ray -- the aura is always treated
-         * as lit, never occluded. Mirrors the light-selection/eval portion
-         * of integrate_surface_direct_light() (this same file) up to (but
-         * not including) shadow ray construction; no BSDF, so no MIS
-         * weight either. Uses this crossing's own entry point, NOT sd.P --
-         * sd.P is only valid for the very first triangle in a fast-hop
-         * chain, since later ones are evaluated without rebuilding
-         * ShaderData for them (that's the whole point of skipping the
-         * normal dispatch loop). */
+      if (strength > 0.0f || sparkle_strength > 0.0f) {
+        /* strength (the continuous aura glow) and sparkle_strength (the
+         * blob field) are independently controllable -- either can be 0
+         * while the other is active. Shared setup (entry point, smooth
+         * frame, ambient) happens unconditionally below since both paths
+         * need it; the aura's own NEE light sample and density integral
+         * are skipped entirely when strength is 0 (sparkles borrow their
+         * own color from the real mesh instead, via borrowed_rgb below,
+         * and don't need the aura's hue at all). */
+
+        /* Uses this crossing's own entry point, NOT sd.P -- sd.P is only
+         * valid for the very first triangle in a fast-hop chain, since
+         * later ones are evaluated without rebuilding ShaderData for them
+         * (that's the whole point of skipping the normal dispatch loop). */
         const float3 current_P = ray.P + t_enter * ray.D;
 
-        float3 light_rgb = zero_float3();
-        {
-          RNGState rng_state;
-          path_state_rng_load(state, &rng_state);
-          const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
-          const uint bounce = INTEGRATOR_STATE(state, path, bounce);
-          const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
-
-          LightSample ls ccl_optional_struct_init;
-          /* SR_BSDF_HAS_TRANSMISSION tells the light tree/selection this
-           * "receiver" needs light from every direction, not just Nface's
-           * hemisphere -- without it, a face whose own triangle normal
-           * points away from a light gets that light culled entirely
-           * (zero contribution), creating a hard cutoff right where two
-           * adjacent prism faces meet but only one is "lit" by hemisphere
-           * logic. The aura has no real front/back, and per design should
-           * pick up light regardless of any real geometry orientation or
-           * occlusion in between. light_link_receiver_nee only reads
-           * sd->object (light-linking is object-level, not per-triangle),
-           * which stays correct throughout a fast-hop chain since all
-           * hops stay within this same object. */
-          if (light_sample_from_position(kg,
-                                         rand_light,
-                                         sd.time,
-                                         current_P,
-                                         Nface,
-                                         light_link_receiver_nee(kg, &sd),
-                                         SR_BSDF_HAS_TRANSMISSION,
-                                         bounce,
-                                         path_flag,
-                                         &ls) &&
-              ls.pdf > 0.0f)
-          {
-            Spectrum light_eval;
-            const bool is_constant = light_sample_shader_eval_nee_constant(
-                kg, ls.shader, ls.prim, ls.type != LIGHT_TRIANGLE, light_eval);
-            if (!is_constant && ls.type != LIGHT_TRIANGLE && ls.type != LIGHT_BACKGROUND) {
-              light_sample_shader_eval_forward(
-                  kg, state, ls.prim, current_P, ls.D, ls.t, sd.time, light_eval);
-            }
-            light_rgb = spectrum_to_rgb(light_eval) * (ls.eval_fac / ls.pdf);
-          }
-        }
+        /* Smoothly-blended (position, normal) pair for this point -- see
+         * prism_smooth_frame's own comment in math_prism.h. Used for
+         * everything below (NEE direction, density integral, sparkle
+         * field); the geometric clip above already finished with the
+         * triangle's real flat tri_P/Nface and is unaffected. */
+        float3 smooth_P, smooth_N;
+        prism_smooth_frame(
+            tri_P[0], tri_P[1], tri_P[2], tri_N[0], tri_N[1], tri_N[2], current_P, &smooth_P, &smooth_N);
 
         /* Ambient: the world background's overall color, one-shot -- no
          * importance sampling, no recursive bounce (deliberately "not like
          * a diffuse surface"). Falls back to nothing for a non-constant
          * (textured/procedural) world; a research-prototype
-         * simplification. */
+         * simplification. Computed unconditionally: both the aura's own
+         * hue below and the sparkle field's borrowed_rgb use it. */
         float3 ambient_rgb = zero_float3();
         {
           Spectrum ambient_eval;
@@ -999,21 +949,235 @@ ccl_device int integrate_surface(KernelGlobals kg,
           }
         }
 
-        /* Multiply then rescale: incoming light acts as a colored filter
-         * over the aura's own inherent color; the magnitude comes entirely
-         * from the density integral below, not from the light. */
-        const float3 tinted = aura_color * (light_rgb + ambient_rgb);
-        const float tinted_avg = average(tinted);
-        const float3 hue = (tinted_avg > 1e-6f) ? tinted / tinted_avg : aura_color;
+        float3 hue = zero_float3();
+        float integral = 0.0f;
 
-        /* Fog/volume-style magnitude: integrate the density along the
-         * actual segment the ray travels through this prism, rather than
-         * point-sampling at the entry -- see prism_density_integral's
-         * comment in math_prism.h. */
-        const float integral = prism_density_integral(
-            ray.P, ray.D, tri_P[0], Nface, thickness, falloff_power, t_enter, t_exit);
+        if (strength > 0.0f) {
+          /* Direct light: one NEE-style light sample at the entry point,
+           * deliberately WITHOUT a shadow ray -- the aura is always
+           * treated as lit, never occluded. Mirrors the light-selection/
+           * eval portion of integrate_surface_direct_light() (this same
+           * file) up to (but not including) shadow ray construction; no
+           * BSDF, so no MIS weight either. */
+          float3 light_rgb = zero_float3();
+          {
+            RNGState rng_state;
+            path_state_rng_load(state, &rng_state);
+            const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+            const uint bounce = INTEGRATOR_STATE(state, path, bounce);
+            const float3 rand_light = path_state_rng_3D(kg, &rng_state, PRNG_LIGHT);
 
-        const Spectrum glow_L = rgb_to_spectrum(hue) * (strength * integral);
+            LightSample ls ccl_optional_struct_init;
+            /* SR_BSDF_HAS_TRANSMISSION tells the light tree/selection this
+             * "receiver" needs light from every direction, not just Nface's
+             * hemisphere -- without it, a face whose own triangle normal
+             * points away from a light gets that light culled entirely
+             * (zero contribution), creating a hard cutoff right where two
+             * adjacent prism faces meet but only one is "lit" by hemisphere
+             * logic. The aura has no real front/back, and per design should
+             * pick up light regardless of any real geometry orientation or
+             * occlusion in between. light_link_receiver_nee only reads
+             * sd->object (light-linking is object-level, not per-triangle),
+             * which stays correct throughout a fast-hop chain since all
+             * hops stay within this same object. */
+            if (light_sample_from_position(kg,
+                                           rand_light,
+                                           sd.time,
+                                           smooth_P,
+                                           smooth_N,
+                                           light_link_receiver_nee(kg, &sd),
+                                           SR_BSDF_HAS_TRANSMISSION,
+                                           bounce,
+                                           path_flag,
+                                           &ls) &&
+                ls.pdf > 0.0f)
+            {
+              Spectrum light_eval;
+              const bool is_constant = light_sample_shader_eval_nee_constant(
+                  kg, ls.shader, ls.prim, ls.type != LIGHT_TRIANGLE, light_eval);
+              if (!is_constant && ls.type != LIGHT_TRIANGLE && ls.type != LIGHT_BACKGROUND) {
+                light_sample_shader_eval_forward(
+                    kg, state, ls.prim, smooth_P, ls.D, ls.t, sd.time, light_eval);
+              }
+              light_rgb = spectrum_to_rgb(light_eval) * (ls.eval_fac / ls.pdf);
+            }
+          }
+
+          /* Multiply then rescale: incoming light acts as a colored filter
+           * over the aura's own inherent color; the magnitude comes
+           * entirely from the density integral below, not from the
+           * light. */
+          const float3 tinted = aura_color * (light_rgb + ambient_rgb);
+          const float tinted_avg = average(tinted);
+          hue = (tinted_avg > 1e-6f) ? tinted / tinted_avg : aura_color;
+
+          /* Fog/volume-style magnitude: integrate the density along the
+           * actual segment the ray travels through this prism, rather
+           * than point-sampling at the entry -- see
+           * prism_density_integral's comment in math_prism.h. */
+          integral = prism_density_integral(
+              ray.P, ray.D, smooth_P, smooth_N, thickness, falloff_power, t_enter, t_exit);
+        }
+
+        /* Joy skin sparkle field (research prototype, see math_sparkle.h):
+         * a sparse scatter of small glow points, additive on top of the
+         * aura's own continuous glow above. 0 strength skips the
+         * (otherwise per-crossing, 27-cell) evaluation entirely. out_center
+         * (written only when a blob is actually found) is the winning
+         * blob's own 3D center, needed below to look up its borrowed
+         * color. */
+        float3 sparkle_center = zero_float3();
+        const float sparkle = (sparkle_strength > 0.0f) ?
+                                  sparkle_field_eval(ray.P,
+                                                     ray.D,
+                                                     t_enter,
+                                                     t_exit,
+                                                     smooth_P,
+                                                     smooth_N,
+                                                     kobject.prism_sparkle_cell_size,
+                                                     kobject.prism_sparkle_max_dist,
+                                                     kobject.prism_sparkle_radius_near,
+                                                     kobject.prism_sparkle_radius_far,
+                                                     kobject.prism_sparkle_keep_near,
+                                                     kobject.prism_sparkle_keep_far,
+                                                     falloff_power,
+                                                     &sparkle_center) :
+                                  0.0f;
+
+        /* Each sparkle blob borrows its own color from the REAL mesh
+         * material at the point directly below it (projected along the
+         * triangle's own flat face normal) -- NOT the aura's own
+         * shadowless tinted hue above. A blob sitting over a lit patch
+         * should look bright/warm; one sitting over a shadowed patch
+         * should look dark/cool, matching the mesh's own appearance there
+         * rather than a flat aura tint.
+         *
+         * This evaluates the REAL material's own albedo (diffuse +
+         * glossy response, not just a flat base color) and does ONE real,
+         * shadow-ray-tested direct light sample at that exact point --
+         * deliberately NOT the aura's own shadowless "always lit" shortcut
+         * above, since shadow-awareness is the whole point here. Also
+         * deliberately NOT indirect/GI: the real mesh already gets its
+         * own full bounces through the normal render, completely
+         * unaffected by any of this -- the blob only needs a cheap,
+         * reasonable stand-in for "what color is the surface right here",
+         * not a nested path trace. */
+        float3 borrowed_rgb = zero_float3();
+        if (sparkle > 0.0f) {
+          const uint32_t path_flag = INTEGRATOR_STATE(state, path, flag);
+          const float height_below = dot(sparkle_center - tri_P[0], Nface);
+          const float3 point_on_face = sparkle_center - height_below * Nface;
+
+          float bary_u, bary_v, bary_w;
+          prism_triangle_barycentric(
+              tri_P[0], tri_P[1], tri_P[2], point_on_face, &bary_u, &bary_v, &bary_w);
+
+          ShaderDataTinyStorage borrow_sd_storage;
+          ccl_private ShaderData *borrow_sd = AS_SHADER_DATA(&borrow_sd_storage);
+          shader_setup_from_sample(kg,
+                                   borrow_sd,
+                                   point_on_face,
+                                   Nface,
+                                   -ray.D,
+                                   kernel_data_fetch(tri_shader, hop_prim),
+                                   sd.object,
+                                   hop_prim,
+                                   bary_v,
+                                   bary_w,
+                                   0.0f,
+                                   sd.time,
+                                   false,
+                                   false);
+
+          surface_shader_eval<node_feature_mask>(
+              kg, state, borrow_sd, nullptr, PATH_RAY_VISIBILITY_NONE, path_flag);
+
+          if (!(borrow_sd->runtime_flag & SR_CACHE_MISS)) {
+            const float3 albedo = spectrum_to_rgb(surface_shader_diffuse(kg, borrow_sd) +
+                                                  surface_shader_glossy(kg, borrow_sd));
+
+            if (!is_zero(albedo)) {
+              RNGState borrow_rng_state;
+              path_state_rng_load(state, &borrow_rng_state);
+              const float3 rand_borrow_light = path_state_rng_3D(
+                  kg, &borrow_rng_state, PRNG_LIGHT);
+              const uint borrow_bounce = INTEGRATOR_STATE(state, path, bounce);
+
+              float3 direct_rgb = zero_float3();
+              LightSample borrow_ls ccl_optional_struct_init;
+              if (light_sample_from_position(kg,
+                                             rand_borrow_light,
+                                             sd.time,
+                                             point_on_face,
+                                             Nface,
+                                             light_link_receiver_nee(kg, &sd),
+                                             SR_BSDF_HAS_TRANSMISSION,
+                                             borrow_bounce,
+                                             path_flag,
+                                             &borrow_ls) &&
+                  borrow_ls.pdf > 0.0f)
+              {
+                Spectrum borrow_light_eval;
+                const bool borrow_is_constant = light_sample_shader_eval_nee_constant(
+                    kg,
+                    borrow_ls.shader,
+                    borrow_ls.prim,
+                    borrow_ls.type != LIGHT_TRIANGLE,
+                    borrow_light_eval);
+                if (!borrow_is_constant && borrow_ls.type != LIGHT_TRIANGLE &&
+                    borrow_ls.type != LIGHT_BACKGROUND)
+                {
+                  light_sample_shader_eval_forward(kg,
+                                                   state,
+                                                   borrow_ls.prim,
+                                                   point_on_face,
+                                                   borrow_ls.D,
+                                                   borrow_ls.t,
+                                                   sd.time,
+                                                   borrow_light_eval);
+                }
+
+                /* Real shadow test -- unlike the aura's own one-shot NEE
+                 * above, this is what makes shadowed areas actually
+                 * darken the blob. A simple synchronous opaque occlusion
+                 * test (not the queued transparent-shadow path real
+                 * surfaces use) -- acceptable for a cheap stand-in. */
+                Ray borrow_shadow_ray ccl_optional_struct_init;
+                light_sample_to_surface_shadow_ray(kg, borrow_sd, &borrow_ls, &borrow_shadow_ray);
+                const bool borrow_occluded = scene_intersect_shadow(
+                    kg, &borrow_shadow_ray, PATH_RAY_VISIBILITY_SHADOW_OPAQUE);
+
+                if (!borrow_occluded) {
+                  /* Full BSDF response to this specific light direction
+                   * (same call the real direct-light path uses) rather
+                   * than albedo*irradiance -- albedo alone is missing the
+                   * BSDF's own cosine/normalization terms, which made
+                   * lit-side blobs read badly overexposed compared to the
+                   * real mesh right next to them (no MIS weight here,
+                   * same simplification the aura's own light sample
+                   * above already makes). */
+                  BsdfEval borrow_bsdf_eval ccl_optional_struct_init;
+                  float borrow_avg_roughness_squared = 0.0f;
+                  surface_shader_bsdf_eval(kg,
+                                           state,
+                                           borrow_sd,
+                                           borrow_ls.D,
+                                           &borrow_bsdf_eval,
+                                           borrow_ls.shader,
+                                           borrow_avg_roughness_squared);
+                  bsdf_eval_mul(&borrow_bsdf_eval,
+                               borrow_light_eval * (borrow_ls.eval_fac / borrow_ls.pdf));
+                  direct_rgb = spectrum_to_rgb(bsdf_eval_sum(&borrow_bsdf_eval));
+                }
+              }
+
+              borrowed_rgb = direct_rgb + albedo * ambient_rgb;
+            }
+          }
+        }
+
+        const Spectrum glow_L = rgb_to_spectrum(hue) * (strength * integral) +
+                                rgb_to_spectrum(borrowed_rgb) * (sparkle_strength * sparkle);
 
         /* Cap accumulated brightness at what this aura would look like AT
          * THE SURFACE (height = 0, i.e. density = 1, no falloff) --
@@ -1032,8 +1196,32 @@ ccl_device int integrate_surface(KernelGlobals kg,
          * prism's own cap gets pulled down to it. In practice the color
          * follows whichever prism is currently being crossed while the
          * overall brightness stays pinned at the same ceiling, like a
-         * hand-off rather than two lights adding together. */
-        const Spectrum surface_cap = rgb_to_spectrum(hue) * strength;
+         * hand-off rather than two lights adding together. Sums the aura's
+         * own ceiling (hue * strength) with the sparkle field's own fixed
+         * ceiling (prism_sparkle_max_brightness, independent of strength
+         * and of borrowed_rgb) rather than sharing one color for both,
+         * mirroring glow_L's own two differently-colored terms above --
+         * the ceiling still accounts for both contributions' combined
+         * maximum, just no longer assuming they're the same color.
+         *
+         * Deliberately NOT borrowed_rgb * sparkle_strength here (as an
+         * earlier version did): borrowed_rgb is zero on any triangle
+         * where no blob was actually found this crossing (sparkle <= 0),
+         * which made the sparkle half of the cap collapse to 0 on every
+         * blob-less triangle in a hop chain -- with strength also 0 (aura
+         * fully off), the WHOLE cap was 0 there, clamping the running
+         * accumulator back to 0 and erasing a blob's brightness the
+         * moment the ray's chain passed through even one neighboring
+         * triangle without its own blob. A fixed, user-controlled ceiling
+         * (prism_sparkle_max_brightness) has no such dependency on
+         * whether THIS triangle happens to have a blob, so it can't
+         * accidentally erase a blob picked up elsewhere in the same
+         * burst -- and it's what makes "cap the blobs independently of
+         * aura strength" an actual independent control rather than one
+         * that silently inherits the aura's own ceiling. */
+        const Spectrum surface_cap =
+            rgb_to_spectrum(hue) * strength +
+            make_spectrum(sparkle_strength * kobject.prism_sparkle_max_brightness);
         /* Approximate mode (kobject.prism_approximate): combine crossings
          * with max() instead of summing them and relying on the cap above
          * -- a cheaper approximation that sidesteps brightness stacking
@@ -1051,9 +1239,13 @@ ccl_device int integrate_surface(KernelGlobals kg,
         const int edge_slot = exit_plane - PRISM_EXIT_EDGE0;
         const packed_int3 adj = kernel_data_fetch(tri_adjacency, hop_prim);
         const int neighbor = (edge_slot == 0) ? adj.x : (edge_slot == 1) ? adj.y : adj.z;
-        if (neighbor >= 0) {
+        if (neighbor >= 0 && neighbor != prev_hop_prim) {
           /* Fast-hop: continue the loop with the known neighbor, same ray,
-           * no BVH search. */
+           * no BVH search. (neighbor != prev_hop_prim refuses an immediate
+           * reversal back to the triangle this chain just came from -- see
+           * prev_hop_prim's own comment above for why that's the dilemma
+           * case that actually needs resolving, not low progress itself.) */
+          prev_hop_prim = hop_prim;
           hop_prim = neighbor;
           continue;
         }
@@ -1145,13 +1337,19 @@ ccl_device int integrate_surface(KernelGlobals kg,
   {
     const Spectrum prism_total = INTEGRATOR_STATE(state, path, prism_accum_L);
     if (!is_zero(prism_total)) {
-      /* Experiment: if this real surface belongs to the SAME object whose
-       * prism shell the ray just came from, discard the accumulated glow
-       * instead of flushing it -- landing back on that object's own
-       * surface right after passing through its own shell was producing an
-       * artifact. A different object's surface (or the background, handled
-       * separately in shade_background.h) still gets the glow normally. */
-      if (INTEGRATOR_STATE(state, path, prism_last_object) != sd.object) {
+      /* Backface culling (kobject.prism_backface_culling, default on): if
+       * this real surface belongs to the SAME object whose prism shell the
+       * ray just came from, discard the accumulated glow instead of
+       * flushing it -- landing back on that object's own surface right
+       * after passing through its own shell was producing an artifact.
+       * Unchecking this keeps and flushes that glow too, crediting rays
+       * regardless of which object (or the background, handled separately
+       * in shade_background.h) they end up hitting. */
+      const ccl_global KernelObject &hit_kobject = kernel_data_fetch(objects, sd.object);
+      const bool same_object_culled = (hit_kobject.prism_backface_culling != 0) &&
+                                      (INTEGRATOR_STATE(state, path, prism_last_object) ==
+                                       sd.object);
+      if (!same_object_culled) {
         film_write_surface_emission(kg, state, prism_total, 1.0f, render_buffer);
       }
       INTEGRATOR_STATE_WRITE(state, path, prism_accum_L) = zero_spectrum();
@@ -1163,6 +1361,14 @@ ccl_device int integrate_surface(KernelGlobals kg,
      * crossing a few prisms after every bounce. */
     INTEGRATOR_STATE_WRITE(state, path, prism_crossings) = 0;
     INTEGRATOR_STATE_WRITE(state, path, prism_last_object) = -1;
+    /* Record which object this real surface belongs to -- whatever ray(s)
+     * continue the path from here (diffuse bounce, transmission, etc.)
+     * depart from this object, so if one of them grazes this SAME object's
+     * own prism shell again and then escapes to the background with no
+     * further real-surface hit, shade_background.h can apply the same
+     * backface-culling exclusion (see prism_depart_object's own comment in
+     * state_template.h). */
+    INTEGRATOR_STATE_WRITE(state, path, prism_depart_object) = sd.object;
   }
 
   int continue_path_label = 0;

@@ -137,6 +137,31 @@ ccl_device_forceinline bool bvh_shadow_all_anyhit_filter(
     const Intersection isect)
 
 {
+  /* Prism shell (research prototype): the aura shell deliberately casts no
+   * shadow -- it's meant to look like glow, not a solid occluder (same
+   * design intent as kernel_embree_custom_occluded_func_impl's pass-through
+   * for the simple/opaque shadow-ray path in device/cpu/bvh.h). That
+   * function only covers the OPAQUE occlusion test; this transparent-shadow
+   * ("shadow_all") filter is a separate code path used whenever MIS/soft
+   * shadows need to walk through multiple intersections, and had no
+   * matching check -- it fell through to the generic shader-based test
+   * below, which reads intersection_get_shader_flags() using the prism's
+   * reused real-triangle prim index, i.e. the REAL surface's own material.
+   * An ordinary opaque material has no SD_HAS_TRANSPARENT_SHADOW flag, so
+   * that generic check was treating every prism crossing along a shadow
+   * ray's path as a fully opaque blocker. In practice this made a shadow
+   * ray from a lit point on a mesh toward a light self-shadow itself
+   * whenever it happened to graze a NEARBY triangle's own prism shell on
+   * the way there -- a false self-shadow whose exact shape/strength
+   * depends on the mesh's own triangulation (confirmed: visible as a faint
+   * but sharp brightness seam tracing a flat quad's triangulation diagonal,
+   * present even with 0 indirect bounces and with backface culling
+   * verified independently correct, which ruled out the prism glow/
+   * accumulation code itself and pointed here instead). Skipping prism
+   * hits here, matching the opaque path, removes that false shadowing. */
+  if (isect.type == PRIMITIVE_PRISM) {
+    return true;
+  }
 #if defined(__VISIBILITY_FLAG__)
   if constexpr ((perform_intersection_tests & ISECT_TEST_VISIBILITY_FLAG) != 0) {
     if ((kernel_data_fetch(objects, isect.object).visibility & ray_visibility) == 0) {

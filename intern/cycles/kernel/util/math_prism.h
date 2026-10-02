@@ -254,6 +254,94 @@ ccl_device_inline bool ray_triangle_prism_intersect(const float3 ray_P,
   return true;
 }
 
+/* Blend a triangle's 3 vertex positions AND 3 vertex normals, using the SAME
+ * barycentric weights, to get a smoothly-varying (position, normal) pair at
+ * point P -- used everywhere DOWNSTREAM of the geometric clip (NEE light
+ * sample direction, the density integral's height reference, the sparkle
+ * field), never for ray_triangle_prism_intersect's own 5-plane clip itself
+ * (which deliberately keeps using the triangle's real flat tri_P/Nface, so
+ * t_enter/t_exit/exit_plane and the fast-hop adjacency stay exact).
+ *
+ * Why this matters: each triangle's raw, unblended (tri_P0, Nface) is
+ * necessarily DIFFERENT from its neighbor's -- even where they share an
+ * edge, a flat triangle's OWN face normal and OWN arbitrary first vertex are
+ * particular to that triangle, not to the curved surface the mesh is
+ * approximating. On a curved mesh (a sphere, not a cube), two adjacent
+ * triangles computing "height above the surface" and "which way is out"
+ * from their own independent flat data disagree almost everywhere, which
+ * shows up as a hard per-triangle facet pattern in the glow -- the exact
+ * flat-shading-style artifact this is meant to avoid, except here it's in
+ * the AURA's glow, not the base material.
+ *
+ * Blending BOTH position and normal (not just normal) matters too: height
+ * is measured as dot(P - reference_point, reference_normal). Even with a
+ * shared/smoothed normal, two neighboring triangles still disagree on
+ * "where height = 0 starts" unless the reference POINT is also interpolated
+ * -- tri_P0 is just one arbitrary vertex, not a point on some common plane
+ * the two triangles agree on.
+ *
+ * Barycentric weights are computed via the standard dot-product formulation
+ * (valid for P off the triangle's plane too, via the affine extension --
+ * exactly what's needed here, since P is the entry point somewhere IN the
+ * shell above the triangle, not on it). Shared vertices between adjacent
+ * triangles have identical positions/normals by construction (see this
+ * file's header comment), so right at a shared edge both triangles'
+ * blends agree exactly; moving away from the edge they smoothly diverge
+ * (linear interpolation, continuous but not necessarily C1) rather than
+ * jumping -- the same kind of seam ordinary Gouraud-shaded smooth normals
+ * have, not a hard facet edge. */
+ccl_device_inline void prism_triangle_barycentric(const float3 tri_P0,
+                                                  const float3 tri_P1,
+                                                  const float3 tri_P2,
+                                                  const float3 P,
+                                                  ccl_private float *bary_u,
+                                                  ccl_private float *bary_v,
+                                                  ccl_private float *bary_w)
+{
+  const float3 v0 = tri_P1 - tri_P0;
+  const float3 v1 = tri_P2 - tri_P0;
+  const float3 v2 = P - tri_P0;
+  const float d00 = dot(v0, v0);
+  const float d01 = dot(v0, v1);
+  const float d11 = dot(v1, v1);
+  const float d20 = dot(v2, v0);
+  const float d21 = dot(v2, v1);
+  const float denom = d00 * d11 - d01 * d01;
+
+  if (fabsf(denom) < 1e-12f) {
+    /* Degenerate (near-zero-area) triangle: fall back to the flat values
+     * rather than divide by ~0. */
+    *bary_u = *bary_v = *bary_w = 1.0f / 3.0f;
+    return;
+  }
+
+  const float v = (d11 * d20 - d01 * d21) / denom;
+  const float w = (d00 * d21 - d01 * d20) / denom;
+  *bary_u = 1.0f - v - w;
+  *bary_v = v;
+  *bary_w = w;
+}
+
+ccl_device_inline void prism_smooth_frame(const float3 tri_P0,
+                                          const float3 tri_P1,
+                                          const float3 tri_P2,
+                                          const float3 tri_N0,
+                                          const float3 tri_N1,
+                                          const float3 tri_N2,
+                                          const float3 P,
+                                          ccl_private float3 *smooth_P,
+                                          ccl_private float3 *smooth_N)
+{
+  float u, v, w;
+  prism_triangle_barycentric(tri_P0, tri_P1, tri_P2, P, &u, &v, &w);
+
+  *smooth_P = u * tri_P0 + v * tri_P1 + w * tri_P2;
+
+  const float3 n = u * tri_N0 + v * tri_N1 + w * tri_N2;
+  const float len_sq = dot(n, n);
+  *smooth_N = (len_sq > 1e-12f) ? n / sqrtf(len_sq) : tri_N0;
+}
+
 /* Closed-form integral of density(height) = clamp(1 - height/radius, 0,
  * 1)^power along the ray segment [t_enter, t_exit], where height(t) =
  * dot(ray_P + t*ray_D - tri_P0, Nface) varies linearly in t (see this
